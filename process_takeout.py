@@ -3,7 +3,16 @@ import json
 import argparse
 
 def process_chat_folder(chat_folder, output_folder):
-    """Process a single chat folder and generate a formatted text file."""
+    """
+    Process a single chat folder and generate a formatted text file.
+
+    Parameters:
+        chat_folder (str): The path to the folder containing the chat data (including group_info.json and messages.json).
+        output_folder (str): The path where the formatted text file will be saved.
+
+    The function reads the `group_info.json` and `messages.json` files, formats the data, 
+    and writes the conversation into a text file in the output folder.
+    """
     group_info_path = os.path.join(chat_folder, "group_info.json")
     messages_path = os.path.join(chat_folder, "messages.json")
 
@@ -106,7 +115,15 @@ def process_chat_folder(chat_folder, output_folder):
 
 
 def process_google_chat_folder(chat_root):
-    """Process all chat folders inside the Groups subdirectory of the Google Chat directory."""
+    """
+    Process all chat folders inside the Groups subdirectory of the Google Chat directory.
+
+    Parameters:
+        chat_root (str): The root directory of the Google Chat export, where the 'Groups' folder is located.
+
+    The function processes each folder inside the 'Groups' directory, calling `process_chat_folder`
+    for each chat folder to generate formatted text files.
+    """
     groups_folder = os.path.join(chat_root, "Groups")
     
     if not os.path.exists(groups_folder):
@@ -121,9 +138,17 @@ def process_google_chat_folder(chat_root):
             process_chat_folder(folder_path, output_folder)
 
 if __name__ == "__main__":
-    # parser = argparse.ArgumentParser(description="Process Google Chat Takeout data.")
-    # parser.add_argument("chat_root", help="Path to the Google Chat export folder")
-    # args = parser.parse_args()
+    """
+    Main entry point for processing Google Chat data exported via Google Takeout.
 
-    myvar = "/Users/john/Documents/MGI/Employment Case/Takeout/Google Chat" 
-    process_google_chat_folder(myvar)
+    The script takes a single argument: the path to the Google Chat export folder, 
+    processes the chat folders inside it, and generates formatted text files for each chat.
+
+    Usage:
+        python script_name.py /path/to/google/chat/export
+    """
+    parser = argparse.ArgumentParser(description="Process Google Chat Takeout data.")
+    parser.add_argument("chat_root", help="Path to the Google Chat export folder")
+    args = parser.parse_args()
+
+    process_google_chat_folder(args.chat_root)
