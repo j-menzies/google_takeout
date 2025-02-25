@@ -1,6 +1,10 @@
 import os
 import json
 import argparse
+import mailbox
+from collections import defaultdict
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
 
 def process_chat_folder(chat_folder, output_folder):
     """
@@ -137,18 +141,106 @@ def process_google_chat_folder(chat_root):
         if os.path.isdir(folder_path):  # Process only directories
             process_chat_folder(folder_path, output_folder)
 
+def extract_email_body(message):
+    """Extract plain text body from an email message."""
+    body = None
+    if message.is_multipart():
+        for part in message.walk():
+            if part.get_content_type() == "text/plain":
+                body = part.get_payload(decode=True).decode(
+                    part.get_content_charset(), errors="ignore"
+                )
+                break
+    else:
+        body = message.get_payload(decode=True).decode(
+            message.get_content_charset(), errors="ignore"
+        )
+    return body or "[No content]"
+
+def process_mbox_to_pdf(mbox_file, output_pdf):
+    """Extracts emails from an mbox file, groups them by thread, and writes to a PDF."""
+    mbox = mailbox.mbox(mbox_file)
+
+    # Step 1: Organize emails into threads
+    threads = defaultdict(list)
+    messages_by_id = {}
+
+    for message in mbox:
+        msg_id = message["Message-ID"]
+        in_reply_to = message["In-Reply-To"]
+        references = message["References"]
+
+        messages_by_id[msg_id] = message
+
+        # Determine thread grouping
+        thread_id = in_reply_to or references or msg_id
+        threads[thread_id].append(message)
+
+    # Step 2: Sort emails within each thread by date
+    for thread_id in threads:
+        threads[thread_id].sort(key=lambda msg: msg["date"])
+
+    # Step 3: Generate the PDF
+    c = canvas.Canvas(output_pdf, pagesize=letter)
+    width, height = letter
+    y_position = height - 40  # Start near top of the page
+
+    def write_email(msg, indent=0):
+        """Writes an email message to the PDF with indentation for threads."""
+        nonlocal y_position
+
+        sender = msg["from"] or "Unknown Sender"
+        date = msg["date"] or "Unknown Date"
+        subject = msg["subject"] or "No Subject"
+        body = extract_email_body(msg)
+
+        # Indent replies for readability
+        x_offset = 40 + (indent * 20)
+
+        # Ensure space for new content
+        if y_position < 100:
+            c.showPage()
+            y_position = height - 40
+
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(x_offset, y_position, f"From: {sender}")
+        y_position -= 20
+        c.drawString(x_offset, y_position, f"Date: {date}")
+        y_position -= 20
+        c.drawString(x_offset, y_position, f"Subject: {subject}")
+        y_position -= 20
+        c.setFont("Helvetica", 10)
+        c.drawString(x_offset, y_position, "-" * 60)
+        y_position -= 20
+
+        # Write body with line wrapping
+        for line in body.split("\n"):
+            c.drawString(x_offset, y_position, line)
+            y_position -= 15
+            if y_position < 100:
+                c.showPage()
+                y_position = height - 40
+
+        y_position -= 30  # Space between messages
+
+    # Step 4: Write emails to PDF
+    for thread_id, messages in threads.items():
+        for index, msg in enumerate(messages):
+            write_email(msg, indent=index)  # Indent replies deeper
+
+    c.save()
+    print(f"Processed {mbox_file} -> {output_pdf}")
+
 if __name__ == "__main__":
-    """
-    Main entry point for processing Google Chat data exported via Google Takeout.
-
-    The script takes a single argument: the path to the Google Chat export folder, 
-    processes the chat folders inside it, and generates formatted text files for each chat.
-
-    Usage:
-        python script_name.py /path/to/google/chat/export
-    """
-    parser = argparse.ArgumentParser(description="Process Google Chat Takeout data.")
-    parser.add_argument("chat_root", help="Path to the Google Chat export folder")
+    parser = argparse.ArgumentParser(description="Process Google Chat Takeout data and MBOX emails.")
+    parser.add_argument("--chat_root", help="Path to the Google Chat export folder")
+    parser.add_argument("--mbox", help="Path to the MBOX file for email processing")
+    parser.add_argument("--ignore", help="Path to a file containing email addresses to ignore", default="ignore_emails.txt")
     args = parser.parse_args()
 
-    process_google_chat_folder(args.chat_root)
+    ignore_list = load_ignore_list(args.ignore)
+    
+    if args.chat_root:
+        process_google_chat_folder(args.chat_root)
+    if args.mbox:
+        process_mbox_to_pdf(args.mbox, "emails_output.pdf", ignore_list)
