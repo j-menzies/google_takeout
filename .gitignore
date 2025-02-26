@@ -1,0 +1,4 @@
+ignore_emails.txt
+.env
+emails_output.pdf
+.DS_Store

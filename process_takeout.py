@@ -2,9 +2,38 @@ import os
 import json
 import argparse
 import mailbox
+import email.utils
+from tqdm import tqdm
+from bs4 import BeautifulSoup
 from collections import defaultdict
 from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.units import inch
+from dotenv import load_dotenv
+
+# Load environment variables from the .env file
+load_dotenv()
+
+def get_arg_or_env(arg_name, env_name, required=False):
+    """Helper function to get argument from command line or from environment variable."""
+    # Check for command-line argument first
+    if args.__dict__.get(arg_name):
+        return getattr(args, arg_name)
+    
+    # If not found in command line, check environment variables
+    env_value = os.getenv(env_name)
+    if env_value:
+        return env_value
+    
+    # If neither command line nor environment variable is found and required, show error
+    if required:
+        parser.print_help()
+        raise ValueError(f"Error: '{arg_name}' is required, but not provided.")
+    
+    # If it's not required, return None instead of raising an error
+    return None
 
 def process_chat_folder(chat_folder, output_folder):
     """
@@ -115,8 +144,6 @@ def process_chat_folder(chat_folder, output_folder):
             for attachment in attachments:
                 out_file.write(f"- {attachment}\n")
 
-    print(f"Processed chat: {chat_name}")
-
 
 def process_google_chat_folder(chat_root):
     """
@@ -135,11 +162,15 @@ def process_google_chat_folder(chat_root):
         return
     
     output_folder = chat_root  # Store output in the root Google Chat folder
+    chat_list = os.listdir(groups_folder)
+    total_messages = len(chat_list)
 
-    for folder in os.listdir(groups_folder):
-        folder_path = os.path.join(groups_folder, folder)
-        if os.path.isdir(folder_path):  # Process only directories
-            process_chat_folder(folder_path, output_folder)
+    with tqdm(total=total_messages, desc="Processing Chats", unit=" chat") as pbar:
+        for folder in chat_list:
+            pbar.update(1)
+            folder_path = os.path.join(groups_folder, folder)
+            if os.path.isdir(folder_path):  # Process only directories
+                process_chat_folder(folder_path, output_folder)
 
 def extract_email_body(message):
     """Extract plain text body from an email message."""
@@ -150,97 +181,158 @@ def extract_email_body(message):
                 body = part.get_payload(decode=True).decode(
                     part.get_content_charset(), errors="ignore"
                 )
-                break
+                if body.strip():  # Ensure it's not empty before breaking
+                    break
     else:
         body = message.get_payload(decode=True).decode(
             message.get_content_charset(), errors="ignore"
         )
-    return body or "[No content]"
+    
+    return body if body and body.strip() else "[No content]"
 
-def process_mbox_to_pdf(mbox_file, output_pdf):
-    """Extracts emails from an mbox file, groups them by thread, and writes to a PDF."""
-    mbox = mailbox.mbox(mbox_file)
 
-    # Step 1: Organize emails into threads
+def load_ignore_list(ignore_file):
+    """Load email addresses to ignore from a file."""
+    ignore_list = set()
+    if os.path.exists(ignore_file):
+        with open(ignore_file, "r", encoding="utf-8") as file:
+            ignore_list = {line.strip() for line in file if line.strip()}
+    return ignore_list
+
+def clean_html(html):
+    """Remove HTML tags and return plain text, but retain basic formatting tags."""
+    allowed_tags = ['b', 'i', 'u', 'strong', 'em', 'br']
+    soup = BeautifulSoup(html, "html.parser")
+    
+    # Strip unwanted tags
+    for tag in soup.find_all(True):  # True will match all tags
+        if tag.name not in allowed_tags:
+            tag.unwrap()  # Remove the tag but keep its content
+    
+    return soup.get_text(separator="\n")
+
+
+def process_mbox_to_pdf(mbox_path, output_pdf, ignore_list):
+    """Process an MBOX file and generate a formatted PDF with email threading."""
+    styles = getSampleStyleSheet()
+
+    # Extract the folder where the MBOX file is located
+    mbox_folder = os.path.dirname(os.path.abspath(mbox_path))
+
+    # Check if the provided output_pdf already contains a folder path
+    if os.path.isabs(output_pdf) or os.path.dirname(output_pdf):
+        output_pdf_path = output_pdf  # Respect the full path provided
+    else:
+        # Otherwise, create the output PDF path in the same folder as the MBOX file
+        output_pdf_path = os.path.join(mbox_folder, output_pdf)
+
+    doc = SimpleDocTemplate(output_pdf_path, pagesize=letter)
+    elements = []
+
+    mbox = mailbox.mbox(mbox_path)
+    total_messages = len(mbox)
     threads = defaultdict(list)
     messages_by_id = {}
 
-    for message in mbox:
-        msg_id = message["Message-ID"]
-        in_reply_to = message["In-Reply-To"]
-        references = message["References"]
+    with tqdm(total=total_messages, desc="Processing Emails", unit=" email") as pbar:
+        for message in mbox:
+            msg_id = message["Message-ID"]
+            in_reply_to = message["In-Reply-To"]
+            references = message["References"]
+            sender = message['From']
+            # subject = message['Subject'] if message['Subject'] else "(No Subject)"
+            # date = message['Date'] if message['Date'] else "(No Date)"
 
-        messages_by_id[msg_id] = message
+            # Parse sender to extract both name and email
+            sender_name, sender_email = email.utils.parseaddr(sender)
 
-        # Determine thread grouping
-        thread_id = in_reply_to or references or msg_id
-        threads[thread_id].append(message)
+            if sender_email in ignore_list:
+                # print(f"Ignoring email from {sender_email} on {date} - Subject: {subject}")
+                pbar.update(1)
+                continue  # Skip ignored email addresses
 
-    # Step 2: Sort emails within each thread by date
-    for thread_id in threads:
-        threads[thread_id].sort(key=lambda msg: msg["date"])
+            thread_id = in_reply_to or references or msg_id
+            messages_by_id[msg_id] = message
+            threads[thread_id].append(message)
+            pbar.update(1)
 
-    # Step 3: Generate the PDF
-    c = canvas.Canvas(output_pdf, pagesize=letter)
-    width, height = letter
-    y_position = height - 40  # Start near top of the page
+    total_threads = len(threads)
+    with tqdm(total=total_threads, desc="Organising Threads", unit=" thread") as pbar:
+        for thread_id in threads:
+            threads[thread_id].sort(key=lambda msg: msg["Date"] or "")
+            pbar.update(1)
 
-    def write_email(msg, indent=0):
-        """Writes an email message to the PDF with indentation for threads."""
-        nonlocal y_position
+    with tqdm(total=total_threads, desc="Rendering PDF", unit=" thread") as pbar:
+        for thread_id, messages in threads.items():
+            for index, msg in enumerate(messages):
+                sender = msg['From']
+                # Parse sender to extract both name and email
+                sender_name, sender_email = email.utils.parseaddr(sender)
+                sender_display = f"{sender_name} ({sender_email})"
 
-        sender = msg["from"] or "Unknown Sender"
-        date = msg["date"] or "Unknown Date"
-        subject = msg["subject"] or "No Subject"
-        body = extract_email_body(msg)
+                recipient = msg['To']
+                # Split the recipients and parse each one
+                recipients = recipient.split(",") if recipient else []
+                recipient_displays = []
 
-        # Indent replies for readability
-        x_offset = 40 + (indent * 20)
+                for recipient in recipients:
+                    recipient_name, recipient_email = email.utils.parseaddr(recipient)
+                    recipient_display = f"{recipient_name} ({recipient_email})" if recipient_name else recipient_email
+                    recipient_displays.append(recipient_display)
 
-        # Ensure space for new content
-        if y_position < 100:
-            c.showPage()
-            y_position = height - 40
+                # Join the recipient display names with commas
+                recipient_display = ", ".join(recipient_displays)
 
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(x_offset, y_position, f"From: {sender}")
-        y_position -= 20
-        c.drawString(x_offset, y_position, f"Date: {date}")
-        y_position -= 20
-        c.drawString(x_offset, y_position, f"Subject: {subject}")
-        y_position -= 20
-        c.setFont("Helvetica", 10)
-        c.drawString(x_offset, y_position, "-" * 60)
-        y_position -= 20
+                subject = msg['Subject'] if msg['Subject'] else "(No Subject)"
+                date = msg['Date'] if msg['Date'] else "(No Date)"
+                labels = msg['X-Gmail-Labels'] if msg['X-Gmail-Labels'] else "(No Labels)"
 
-        # Write body with line wrapping
-        for line in body.split("\n"):
-            c.drawString(x_offset, y_position, line)
-            y_position -= 15
-            if y_position < 100:
-                c.showPage()
-                y_position = height - 40
+                indent = "&nbsp;&nbsp;&nbsp;&nbsp;" * index  # Indent replies
+                email_header = [
+                    Paragraph(f"{indent}From: {sender_display}", styles['Normal']),
+                    Paragraph(f"{indent}To: {recipient_display}", styles['Normal']),
+                    Paragraph(f"{indent}Date: {date}", styles['Normal']),
+                    Paragraph(f"{indent}Subject: {subject}", styles['Normal']),
+                    Paragraph(f"{indent}Labels: {labels}", styles['Normal']),
+                    Spacer(1, 0.2 * inch),
+                ]
+                elements.extend(email_header)
 
-        y_position -= 30  # Space between messages
+                body = extract_email_body(msg)
+                if body:
+                    body_text = clean_html(body).replace("\n", "<br />")
+                    elements.append(Paragraph(body_text, styles['Normal']))
+                else:
+                    elements.append(Paragraph("(No content)", styles['Italic']))
+                
+                elements.append(Spacer(1, 0.5 * inch))
+                pbar.update(1)
 
-    # Step 4: Write emails to PDF
-    for thread_id, messages in threads.items():
-        for index, msg in enumerate(messages):
-            write_email(msg, indent=index)  # Indent replies deeper
-
-    c.save()
-    print(f"Processed {mbox_file} -> {output_pdf}")
+    print("Creating PDF File...")
+    doc.build(elements)
+    print(f"Processed {mbox_path} into {output_pdf_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process Google Chat Takeout data and MBOX emails.")
     parser.add_argument("--chat_root", help="Path to the Google Chat export folder")
     parser.add_argument("--mbox", help="Path to the MBOX file for email processing")
     parser.add_argument("--ignore", help="Path to a file containing email addresses to ignore", default="ignore_emails.txt")
-    args = parser.parse_args()
-
-    ignore_list = load_ignore_list(args.ignore)
     
-    if args.chat_root:
-        process_google_chat_folder(args.chat_root)
-    if args.mbox:
-        process_mbox_to_pdf(args.mbox, "emails_output.pdf", ignore_list)
+    # Parse command-line arguments
+    args = parser.parse_args()
+    
+    # Use the helper function to get the required arguments
+    chat_root = get_arg_or_env('chat_root', 'CHAT_ROOT', required=False)
+    mbox = get_arg_or_env('mbox', 'MBOX_PATH', required=False)
+    ignore_list = load_ignore_list(get_arg_or_env('ignore', 'IGNORE_EMAILS_FILE', required=False))
+
+    if not chat_root and not mbox:
+        parser.print_help()
+        exit(1)
+
+
+    # Process the provided or environment-loaded arguments
+    if chat_root:
+        process_google_chat_folder(chat_root)
+    if mbox:
+        process_mbox_to_pdf(mbox, "emails_output.pdf", ignore_list)
