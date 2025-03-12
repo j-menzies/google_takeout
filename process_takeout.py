@@ -182,24 +182,6 @@ def process_google_chat_folder(chat_root):
             if os.path.isdir(folder_path):  # Process only directories
                 process_chat_folder(folder_path, output_folder)
 
-def extract_email_body(message):
-    """Extract plain text body from an email message."""
-    body = None
-    if message.is_multipart():
-        for part in message.walk():
-            if part.get_content_type() == "text/plain":
-                body = part.get_payload(decode=True).decode(
-                    part.get_content_charset(), errors="ignore"
-                )
-                if body.strip():  # Ensure it's not empty before breaking
-                    break
-    else:
-        body = message.get_payload(decode=True).decode(
-            message.get_content_charset(), errors="ignore"
-        )
-    
-    return body if body and body.strip() else "[No content]"
-
 
 def load_ignore_list(ignore_file):
     """Load email addresses to ignore from a file."""
@@ -209,22 +191,102 @@ def load_ignore_list(ignore_file):
             ignore_list = {line.strip() for line in file if line.strip()}
     return ignore_list
 
+def clean_style_attributes(style):
+    """Clean unsupported style attributes and convert them to supported ones."""
+    # Define a mapping of unsupported attributes to their supported equivalents (if any)
+    attribute_mapping = {
+        'textTransform': 'textCase',  # Convert 'textTransform' to 'textCase'
+        'textColor': 'textColor',     # 'textColor' is supported
+        'fontWeight': 'bold',         # Convert 'fontWeight' to 'bold'
+        'fontStyle': 'italic',       # Convert 'fontStyle' to 'italic'
+        'textDecoration': 'underline',  # Convert 'textDecoration' to 'underline'
+        'fontFamily': 'fontName',     # Convert 'fontFamily' to 'fontName'
+        'fontSize': 'fontSize',       # 'fontSize' is supported
+        'backgroundColor': 'backColor',  # Convert 'backgroundColor' to 'backColor'
+    }
+    
+    # Define supported attributes
+    supported_attributes = {
+        'fontName', 'fontSize', 'leading', 'textColor', 'alignment', 'backColor',
+        'spaceBefore', 'spaceAfter', 'bold', 'italic', 'underline', 'strike',
+        'firstLineIndent', 'leftIndent', 'rightIndent', 'bulletText', 'bulletFontName',
+        'bulletFontSize', 'textCase', 'listStyle', 'listMarker'
+    }
+
+    # Remove unsupported attributes and convert them if applicable
+    cleaned_style = {}
+    for attr, value in style.items():
+        if attr in supported_attributes:
+            cleaned_style[attr] = value
+        elif attr in attribute_mapping:
+            # Convert unsupported attribute to supported attribute
+            cleaned_style[attribute_mapping[attr]] = value
+
+    return cleaned_style
+
+def parse_style(style_string):
+    """Parse the inline 'style' attribute into a dictionary."""
+    style_dict = {}
+    for rule in style_string.split(';'):
+        if rule.strip():
+            key, value = rule.split(':', 1)
+            style_dict[key.strip()] = value.strip()
+    return style_dict
+
+def format_style(style_dict):
+    """Convert a style dictionary back into a 'style' string."""
+    return '; '.join(f'{key}: {value}' for key, value in style_dict.items())
+
 def clean_html(html):
-    """Remove HTML tags and return plain text, but retain basic formatting tags."""
-    allowed_tags = ['b', 'i', 'u', 'strong', 'em', 'br']
+    """Sanitize HTML for ReportLab's Paragraph while keeping basic formatting."""
     soup = BeautifulSoup(html, "html.parser")
 
-    # Ensure <br> tags are properly formatted
+    # List of supported HTML tags
+    supported_html_tags = [
+        'b', 'strong',  # Bold text
+        'i', 'em',      # Italic text
+        'u',              # Underlined text
+        'strike',         # Strikethrough text
+        'sub',            # Subscript text
+        'sup',            # Superscript text
+        'font',           # Font face, size, and color (deprecated)
+        'p',              # Paragraph tag
+        'br',             # Line break
+        'ul',             # Unordered list
+        'ol',             # Ordered list
+        'li',             # List item
+        'a',              # Hyperlink
+        'center',         # Center-align text (deprecated)
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6'  # Header tags
+    ]
+
+    # Iterate through all tags in the HTML
+    for tag in soup.find_all(True):  # True means find all tags
+        if tag.name not in supported_html_tags:
+            tag.unwrap()  # Remove the tag but keep its contents
+        else:
+            # Clean attributes of the supported tags
+            tag.attrs = {key: value for key, value in tag.attrs.items() if key in ["href", "name", "target"]}
+
+            # If the tag has a 'style' attribute, clean it
+            if 'style' in tag.attrs:
+                style = tag.attrs['style']
+                cleaned_style = clean_style_attributes(parse_style(style))
+                tag.attrs['style'] = format_style(cleaned_style)  # Reassign cleaned style
+
+    # Remove complex structures (tables, divs, spans) but keep content
+    for tag in soup(["table", "tr", "td", "th", "tbody", "tfoot", "thead", "div", "span"]):
+        tag.unwrap()  # Keep content but remove tag
+
+    # Convert <br> to <br/> for proper line breaks
     for br in soup.find_all("br"):
-        br.replace_with("<br/>")  # Proper self-closing tag
+        br.replace_with("<br/>")
 
-    # Strip unwanted tags while preserving content
+    # Strip attributes that ReportLab doesn't support
     for tag in soup.find_all(True):
-        if tag.name not in allowed_tags:
-            tag.unwrap()  
+        tag.attrs = {key: value for key, value in tag.attrs.items() if key in ["href", "name", "target"]}
 
-    # Convert newlines into <br/> for compatibility with ReportLab
-    return str(soup).replace("\n", "<br/>")
+    return str(soup)
 
 
 
@@ -328,43 +390,56 @@ def process_mbox_to_pdf(mbox_path, output_pdf, ignore_list):
     doc.build(elements)
     print(f"Processed {mbox_path} into {output_pdf_path}")
 
-# def clean_html(body):
-#     """Sanitize HTML content to remove or replace problematic tags."""
-#     soup = BeautifulSoup(body, "html.parser")
-    
-#     # Replace <br> tags with a newline or space to prevent the parser error
-#     for br in soup.find_all("br"):
-#         br.insert_before("\n")
-#         # br.extract()
-    
-#     # for tag in soup.find_all(True):  # True finds all tags
-#     #     del tag['style']
-#     # Unwrap all tags but keep the content
-#     for tag in soup.find_all(True):
-#         tag.unwrap()
+def process_body_part(part):
+    content_type = part.get_content_type()
+    body = part.get_payload(decode=True).decode(errors="ignore")
+    if not body:
+        return ""
 
-#     return soup.get_text()
+    if content_type == "text/plain":
+        return body.replace("\n", "<br/>")  # Ensure line breaks work in ReportLab
+    elif content_type == "text/html":
+        return clean_html(body)  # Ensure proper HTML formatting
 
 def extract_email_body(message):
-    """Extracts the email body as text."""
+    """Extracts and combines email body parts while ensuring correct formatting."""
+    body_parts = []
+    html_part = None
+
     if message.is_multipart():
         for part in message.walk():
             content_type = part.get_content_type()
-            if content_type == "text/plain":
-                body = part.get_payload(decode=True).decode(errors="ignore")
-                if "<br>" in body or "</div>" in body or "</p>" in body or "</a>" in body:
-                    return clean_html(body)
-                return body
-            elif content_type == "text/html":
-                # soup = BeautifulSoup(part.get_payload(decode=True), "html.parser")
-                body = part.get_payload(decode=True).decode(errors="ignore")
-                # Clean the HTML before returning
-                return clean_html(body)
-                # return soup.get_text()
+
+            # Skip multipart containers (e.g., multipart/alternative, multipart/mixed)
+            if content_type.startswith("multipart/"):
+                continue
+
+            if content_type == "message/delivery-status":
+                body_parts.append("Delivery Status Message - Not extracting content")
+                # Skip delivery status notifications
+                continue
+
+            # Handle message/rfc822 (nested email)
+            if content_type == "message/rfc822":
+                # Recursively extract the body of the embedded email
+                nested_html_body, nested_text_body = extract_email_body(part.get_payload(0))
+                for text_body in nested_text_body:
+                    body_parts.append(text_body)
+                if nested_html_body:
+                    html_part = nested_html_body
+                continue
+
+            processed_part = process_body_part(part)
+            if processed_part:
+                if content_type == "text/html":
+                    html_part = processed_part  # Prefer HTML if available
+                else:
+                    body_parts.append(processed_part)  # Keep text/plain content
+
+        return html_part, "<br/>".join(body_parts)  # Use HTML if available, otherwise join plain text
     else:
-        body = message.get_payload(decode=True).decode(errors="ignore")
-        return clean_html(body)
-    return ""
+        return process_body_part(message),""  # Handle non-multipart emails
+
 
 def sanitize_filename(filename):
     """Sanitize the filename by replacing special characters with underscores."""
@@ -405,13 +480,14 @@ def process_mbox_to_pdfs(mbox_path, ignore_list):
     mbox = mailbox.mbox(mbox_path, factory=lambda f: email.message_from_binary_file(f, policy=policy.default))
     styles = getSampleStyleSheet()
     total_messages = len(mbox)
+    ignore_count = 0
+    processed_count = 0
     
     with tqdm(total=total_messages, desc="Processing Emails", unit=" email") as pbar:
         for i, message in enumerate(mbox):
-            if i == 1306:
-                print("check")
             sender_name, sender_email = parseaddr(message["From"])
             if sender_email in ignore_list:
+                ignore_count += 1
                 pbar.update(1)
                 continue
             
@@ -433,7 +509,7 @@ def process_mbox_to_pdfs(mbox_path, ignore_list):
             pdf_path = os.path.join(output_folder, pdf_filename)
             
             # Extract email body
-            body = extract_email_body(message)
+            html_body, text_body = extract_email_body(message)
             
             # Save attachments
             email_folder = os.path.join(output_folder, f"email_{i+1:04d}")
@@ -446,18 +522,36 @@ def process_mbox_to_pdfs(mbox_path, ignore_list):
                 Paragraph(f"To: {recipient}", styles["Normal"]),
                 Paragraph(f"Date: {date}", styles["Normal"]),
                 Paragraph(f"Subject: {subject}", styles["Normal"]),
-                Spacer(1, 0.2 * inch),
-                Paragraph(body if body else "(No content)", styles["Normal"]),
-                Spacer(1, 0.5 * inch),
+                Spacer(1, 0.2 * inch)
+                # Paragraph(body if body else "(No content)", styles["Normal"]),
+                
             ]
+            try:
+                if text_body and len(text_body) > 0:
+                    body_paragraph = Paragraph(text_body, styles["Normal"])
+                else:
+                    body_paragraph = Paragraph(html_body, styles["Normal"])
+            except Exception as e:
+                print(f"Error: Unable to extract text body from email sender: {sender_email} subject: {subject} on {date}")
+                print("Will use Text Body instead")
+                try:
+                    body_paragraph = Paragraph(text_body, styles["Normal"])
+                except Exception as e:
+                    print("Error: Unable to extract text body from email, putting in a default message")
+                    body_paragraph = Paragraph("Unable to extrack any content, Sorry", styles["Normal"])
+            
+            elements.append(body_paragraph)
+            elements.append(Spacer(1, 0.5 * inch))
+
             if attachments:
                 elements.append(Paragraph("Attachments:", styles["Normal"]))
                 for attachment in attachments:
                     elements.append(Paragraph(attachment, styles["Italic"]))
             
             doc.build(elements)
+            processed_count += 1
             pbar.update(1)
-    print(f"Processed {total_messages} emails into PDFs in {output_folder}")
+    print(f"Processed {processed_count}/{total_messages} emails into PDFs in {output_folder}. Ignored {ignore_count} emails.")
 
 def parse_ics(ics_file):
     with open(ics_file, "r", encoding="utf-8") as file:
