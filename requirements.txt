@@ -2,3 +2,5 @@ beautifulsoup4
 reportlab
 python-dotenv
 tqdm
+ics
+openpyxl

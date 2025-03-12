@@ -3,6 +3,9 @@ import json
 import argparse
 import mailbox
 import email.utils
+import openpyxl
+import re
+
 from tqdm import tqdm
 from bs4 import BeautifulSoup
 from collections import defaultdict
@@ -12,9 +15,16 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.units import inch
 from dotenv import load_dotenv
+from ics import Calendar
+from email import policy
+from email.utils import parseaddr
+from email.utils import parsedate_tz, mktime_tz
+from datetime import datetime
 
 # Load environment variables from the .env file
 load_dotenv()
+
+OUTPUT_ICS_ATTACHMENTS = os.getenv("OUTPUT_ICS_ATTACHMENTS", "false").strip().lower() in ("true", "1", "t", "y", "yes")
 
 def get_arg_or_env(arg_name, env_name, required=False):
     """Helper function to get argument from command line or from environment variable."""
@@ -203,13 +213,19 @@ def clean_html(html):
     """Remove HTML tags and return plain text, but retain basic formatting tags."""
     allowed_tags = ['b', 'i', 'u', 'strong', 'em', 'br']
     soup = BeautifulSoup(html, "html.parser")
-    
-    # Strip unwanted tags
-    for tag in soup.find_all(True):  # True will match all tags
+
+    # Ensure <br> tags are properly formatted
+    for br in soup.find_all("br"):
+        br.replace_with("<br/>")  # Proper self-closing tag
+
+    # Strip unwanted tags while preserving content
+    for tag in soup.find_all(True):
         if tag.name not in allowed_tags:
-            tag.unwrap()  # Remove the tag but keep its content
-    
-    return soup.get_text(separator="\n")
+            tag.unwrap()  
+
+    # Convert newlines into <br/> for compatibility with ReportLab
+    return str(soup).replace("\n", "<br/>")
+
 
 
 def process_mbox_to_pdf(mbox_path, output_pdf, ignore_list):
@@ -312,10 +328,215 @@ def process_mbox_to_pdf(mbox_path, output_pdf, ignore_list):
     doc.build(elements)
     print(f"Processed {mbox_path} into {output_pdf_path}")
 
+# def clean_html(body):
+#     """Sanitize HTML content to remove or replace problematic tags."""
+#     soup = BeautifulSoup(body, "html.parser")
+    
+#     # Replace <br> tags with a newline or space to prevent the parser error
+#     for br in soup.find_all("br"):
+#         br.insert_before("\n")
+#         # br.extract()
+    
+#     # for tag in soup.find_all(True):  # True finds all tags
+#     #     del tag['style']
+#     # Unwrap all tags but keep the content
+#     for tag in soup.find_all(True):
+#         tag.unwrap()
+
+#     return soup.get_text()
+
+def extract_email_body(message):
+    """Extracts the email body as text."""
+    if message.is_multipart():
+        for part in message.walk():
+            content_type = part.get_content_type()
+            if content_type == "text/plain":
+                body = part.get_payload(decode=True).decode(errors="ignore")
+                if "<br>" in body or "</div>" in body or "</p>" in body or "</a>" in body:
+                    return clean_html(body)
+                return body
+            elif content_type == "text/html":
+                # soup = BeautifulSoup(part.get_payload(decode=True), "html.parser")
+                body = part.get_payload(decode=True).decode(errors="ignore")
+                # Clean the HTML before returning
+                return clean_html(body)
+                # return soup.get_text()
+    else:
+        body = message.get_payload(decode=True).decode(errors="ignore")
+        return clean_html(body)
+    return ""
+
+def sanitize_filename(filename):
+    """Sanitize the filename by replacing special characters with underscores."""
+    # List of characters to replace
+    unsafe_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\n', '\r', '\t']
+    
+    for char in unsafe_chars:
+        filename = filename.replace(char, "_")
+    
+    return filename
+
+def save_attachment(message, output_folder):
+    """Extracts and saves attachments from an email."""
+    attachments = []
+    if message.is_multipart():
+        for part in message.walk():
+            if part.get_content_disposition() == "attachment":
+                filename = sanitize_filename(part.get_filename())
+                if filename == "invite.ics" and not OUTPUT_ICS_ATTACHMENTS:
+                    # We don't wan't these
+                    continue
+                os.makedirs(output_folder, exist_ok=True)
+                
+                if filename:
+                    filepath = os.path.join(output_folder, filename)
+                    with open(filepath, "wb") as f:
+                        f.write(part.get_payload(decode=True))
+                    attachments.append(filename)
+    return attachments
+
+def process_mbox_to_pdfs(mbox_path, ignore_list):
+    """Processes an MBOX file and creates a separate PDF for each email."""
+
+    # Extract the folder where the MBOX file is located
+    output_folder = os.path.join(os.path.dirname(os.path.abspath(mbox_path)),"emails_output")
+
+    os.makedirs(output_folder, exist_ok=True)
+    mbox = mailbox.mbox(mbox_path, factory=lambda f: email.message_from_binary_file(f, policy=policy.default))
+    styles = getSampleStyleSheet()
+    total_messages = len(mbox)
+    
+    with tqdm(total=total_messages, desc="Processing Emails", unit=" email") as pbar:
+        for i, message in enumerate(mbox):
+            if i == 1306:
+                print("check")
+            sender_name, sender_email = parseaddr(message["From"])
+            if sender_email in ignore_list:
+                pbar.update(1)
+                continue
+            
+            subject = message["Subject"] if message["Subject"] else "No Subject"
+            date = message["Date"] if message["Date"] else "No Date"
+            recipient = message["To"] if message["To"] else "No Recipient"
+
+            parsed_date = parsedate_tz(date)
+            if parsed_date:
+                email_date = datetime.fromtimestamp(mktime_tz(parsed_date)).strftime("%Y%m%d")
+            else:
+                email_date = "NoDate"
+
+            # Generate file-safe subject
+            safe_subject = "_".join(subject.split()).replace("/", "_").replace("\\", "_")
+            max_length = 100  # You can adjust this length as needed
+            safe_subject = safe_subject[:max_length]  # Truncate if necessary
+            pdf_filename = f"{i+1:04d}_{email_date}_{safe_subject}.pdf"
+            pdf_path = os.path.join(output_folder, pdf_filename)
+            
+            # Extract email body
+            body = extract_email_body(message)
+            
+            # Save attachments
+            email_folder = os.path.join(output_folder, f"email_{i+1:04d}")
+            attachments = save_attachment(message, email_folder)
+            
+            # Create PDF
+            doc = SimpleDocTemplate(pdf_path, pagesize=letter)
+            elements = [
+                Paragraph(f"From: {sender_name} ({sender_email})", styles["Normal"]),
+                Paragraph(f"To: {recipient}", styles["Normal"]),
+                Paragraph(f"Date: {date}", styles["Normal"]),
+                Paragraph(f"Subject: {subject}", styles["Normal"]),
+                Spacer(1, 0.2 * inch),
+                Paragraph(body if body else "(No content)", styles["Normal"]),
+                Spacer(1, 0.5 * inch),
+            ]
+            if attachments:
+                elements.append(Paragraph("Attachments:", styles["Normal"]))
+                for attachment in attachments:
+                    elements.append(Paragraph(attachment, styles["Italic"]))
+            
+            doc.build(elements)
+            pbar.update(1)
+    print(f"Processed {total_messages} emails into PDFs in {output_folder}")
+
+def parse_ics(ics_file):
+    with open(ics_file, "r", encoding="utf-8") as file:
+        print("Reading Calendar...")
+        calendar = Calendar(file.read())
+    
+    events = []
+    enclosing_pattern = r"-::~:~::~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~::~:~::-"
+    meet_pattern = r"https://meet\.google\.com/([a-z]+-[a-z]+-[a-z]+)"
+    total_events = len(calendar.events)
+    
+    with tqdm(total=total_events, desc="Processing Events", unit=" event") as pbar:
+        for event in calendar.events:
+            attendees = []
+            if hasattr(event, "attendees") and event.attendees:
+                for attendee in event.attendees:
+                    if hasattr(attendee, "partstat"):
+                        status = attendee.partstat  # Extract participation status
+                        attendees.append(f"{attendee.common_name} ({status})")
+
+            description = event.description if event.description else ""
+            meet_code = ""
+
+            meet_match = re.search(meet_pattern, description)
+            if meet_match:
+                meet_code = meet_match.group(1)
+
+            # Remove enclosed content
+            description = re.sub(f"{enclosing_pattern}.*?{enclosing_pattern}", "", description, flags=re.DOTALL).strip()
+
+            events.append([
+                event.name,
+                event.begin.to('local').format("YYYY-MM-DD HH:mm"),
+                event.end.to('local').format("YYYY-MM-DD HH:mm") if event.end else "",
+                event.location if event.location else "",
+                description,
+                "; ".join(attendees) if attendees else "No attendees recorded",
+                meet_code
+            ])
+            pbar.update(1)
+
+    return events
+
+def write_to_excel(events, output_file):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Calendar Events"
+    
+    headers = ["Event Name", "Start Time", "End Time", "Location", "Description", "Accepted Attendees", "Meet Code"]
+    ws.append(headers)
+    
+    for event in events:
+        ws.append(event)
+    
+    wb.save(output_file)
+
+
+def process_calendar(ics_file):
+    
+    print(f"Processing Calendar... {ics_file}")
+    # Extract the folder where the ics file is located
+    ics_path = os.path.dirname(os.path.abspath(ics_file))
+    ics_file_name = ics_file_name = os.path.splitext(os.path.basename(ics_file))[0]
+    output_file = os.path.join(ics_path, f"{ics_file_name}.xlsx")
+    
+    if not os.path.exists(ics_file):
+        print("Error: ICS file not found.")
+        return
+    
+    events = parse_ics(ics_file)
+    write_to_excel(events, output_file)
+    print(f"Spreadsheet saved as {output_file}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process Google Chat Takeout data and MBOX emails.")
     parser.add_argument("--chat_root", help="Path to the Google Chat export folder")
     parser.add_argument("--mbox", help="Path to the MBOX file for email processing")
+    parser.add_argument("--split", action="store_true", help="Split the MBOX file into individual files")
+    parser.add_argument("--ics", help="Path to the Calendar file for processing")
     parser.add_argument("--ignore", help="Path to a file containing email addresses to ignore", default="ignore_emails.txt")
     
     # Parse command-line arguments
@@ -325,14 +546,19 @@ if __name__ == "__main__":
     chat_root = get_arg_or_env('chat_root', 'CHAT_ROOT', required=False)
     mbox = get_arg_or_env('mbox', 'MBOX_PATH', required=False)
     ignore_list = load_ignore_list(get_arg_or_env('ignore', 'IGNORE_EMAILS_FILE', required=False))
+    ics_file = get_arg_or_env('ics', 'ICS_FILE', required=False)
 
-    if not chat_root and not mbox:
+    if not chat_root and not mbox and not ics_file:
         parser.print_help()
         exit(1)
-
 
     # Process the provided or environment-loaded arguments
     if chat_root:
         process_google_chat_folder(chat_root)
     if mbox:
-        process_mbox_to_pdf(mbox, "emails_output.pdf", ignore_list)
+        if args.split:
+            process_mbox_to_pdfs(mbox,ignore_list)  # Split MBOX into individual files
+        else:
+            process_mbox_to_pdf(mbox, "emails_output.pdf", ignore_list)
+    if ics_file:
+        process_calendar(ics_file)

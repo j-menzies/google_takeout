@@ -102,6 +102,7 @@ Alternatively, you can set the following environment variables:
 - ```CHAT_ROOT```: Path to the Google Chat export folder.
 - ```MBOX_PATH```: Path to the MBOX file.
 - ```IGNORE_EMAILS_FILE```: Path to the ignore list file.
+- ```OUTPUT_ICS_ATTACHMENTS```: true/false Will enable or stop ICS attachments on emails being exported. Default = False
 
 This allows you to run the script without command-line arguments:
 
