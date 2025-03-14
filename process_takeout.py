@@ -116,6 +116,10 @@ def process_chat_folder(chat_folder, output_folder):
     # Write conversation to text file
     with open(output_path, "w", encoding="utf-8") as out_file:
         out_file.write(f"Chat: {chat_name}\n")
+        out_file.write(f"Participants: {', '.join(member.get('name',member.get('email','')) for member in group_info.get('members', []))}\n")
+        out_file.write(f"Messages: {len(messages)}\n")
+        out_file.write(f"Attachments: {len(attachments)}\n")
+        out_file.write(f"Message Path: {messages_path}\n")
         out_file.write("=" * 40 + "\n\n")
 
         for msg in messages:
@@ -140,6 +144,28 @@ def process_chat_folder(chat_folder, output_folder):
                 ]
                 text = "Attachment: " + ", ".join(filenames)
 
+            # Handle if there is a URL only in the message
+            elif msg.get('annotations', [{}])[0].get('url_metadata', {}).get('image_url', None):
+                text = msg.get('annotations', [{}])[0].get('url_metadata', {}).get('image_url')
+            
+            # Handle if there is a Meeting URL in the message
+            elif msg.get('annotations', [{}])[0].get('video_call_metadata', {}).get('meeting_space', {}).get('meeting_url',None):
+                text = msg.get('annotations', [{}])[0].get('video_call_metadata', {}).get('meeting_space', {}).get('meeting_url')
+
+            # Handle if there is Call Data in the message
+            elif msg.get('annotations', [{}])[0].get('gsuite_integration_metadata', {}).get('call_data', None):
+                call_data = msg.get('annotations', [{}])[0].get('gsuite_integration_metadata', {}).get('call_data', {})
+                text = f"Call Data: {call_data}"
+
+            # Handle if there is a Google Doc in the message
+            elif msg.get('annotations', [{}])[0].get('drive_metadata', None):
+                drive_document = msg.get('annotations', [{}])[0].get('drive_metadata', {})
+                text = f"Drive Document: {drive_document}"
+            
+            # Handle if there are Annotations that I haven't catered for specifically
+            elif 'annotations' in msg:
+                text = f"Annotations: {msg['annotations']}"
+            
             # Fallback case (shouldn't normally happen)
             else:
                 text = "[No text]"
